@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "RUSTIUM",
+  "version": "0.1.0",
+  "identifier": "com.rustium.browser",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "RUSTIUM",
+        "width": 1280,
+        "height": 860,
+        "minWidth": 900,
+        "minHeight": 600,
+        "decorations": true,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data: https: http:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https: http:; frame-src https: http:;"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Browser",
+    "shortDescription": "RUSTIUM - a modern Rust-powered web browser",
+    "longDescription": "RUSTIUM is a modular desktop web browser built with Rust and Tauri."
+  }
+}
