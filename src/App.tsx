@@ -4,6 +4,14 @@ import {
   ArrowLeft, ArrowRight, RotateCw, Home, Star, Puzzle, Download, UserCircle2,
   Settings, Plus, X, Shield, Search, History, Moon, Sun, Lock, Globe, Pin, VolumeX
 } from "lucide-react";
+import HomePage from "./Home";
+
+const HOME_URL = "rustium://home";
+
+/** True for the built-in start page and any empty/new-tab state. */
+function isHomeUrl(url?: string | null) {
+  return !url || url === "about:blank" || url === HOME_URL || url === "about:home";
+}
 
 type Tab = {
   id: string; title: string; url: string; loading: boolean; pinned: boolean; muted: boolean;
@@ -12,12 +20,12 @@ type Tab = {
 type TabState = { tabs: Tab[]; activeTabId: string | null; closedTabs: Tab[] };
 type SettingsT = { theme: string; searchEngine: string; homepage: string; showBookmarksBar: boolean };
 
-function isSecure(url: string) { return url.startsWith("https://") || url.startsWith("about:") || url.startsWith("tauri:"); }
+function isSecure(url: string) { return url.startsWith("https://") || url.startsWith("about:") || url.startsWith("tauri:") || url.startsWith("rustium:"); }
 
 export default function App() {
   const [tabs, setTabs] = useState<Tab[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [settings, setSettings] = useState<SettingsT>({ theme: "dark", searchEngine: "https://www.google.com/search?q=", homepage: "https://example.com", showBookmarksBar: true });
+  const [settings, setSettings] = useState<SettingsT>({ theme: "dark", searchEngine: "https://www.google.com/search?q=", homepage: HOME_URL, showBookmarksBar: true });
   const [address, setAddress] = useState("");
   const [panel, setPanel] = useState<"none"|"history"|"bookmarks"|"downloads"|"settings">("none");
   const [history, setHistory] = useState<any[]>([]);
@@ -34,7 +42,7 @@ export default function App() {
       setActiveId(snap.tabs.activeTabId);
       setSettings(snap.settings as any);
       const a = snap.tabs.tabs.find(t => t.id === snap.tabs.activeTabId);
-      if (a) setAddress(a.url);
+      if (a) setAddress(isHomeUrl(a.url) ? "" : a.url);
     } catch (e) {
       console.error("Failed to refresh:", e);
       showToast("Failed to refresh", "error");
@@ -44,7 +52,7 @@ export default function App() {
   }
 
   useEffect(() => { refresh(); }, []);
-  useEffect(() => { if (activeTab) setAddress(activeTab.url); }, [activeId]);
+  useEffect(() => { if (activeTab) setAddress(isHomeUrl(activeTab.url) ? "" : activeTab.url); }, [activeId]);
 
   async function getViewport() {
     const el = viewportRef.current; if (!el) return null;
@@ -61,7 +69,9 @@ export default function App() {
     const vp = await getViewport();
     if (!t || !vp || vp.width < 50 || vp.height < 50) return;
     await Promise.all(list.filter(o => o.id !== t.id).map(o => invoke("close_content", { tabId: o.id }).catch(()=>{})));
-    if (!t.url || t.url === "about:blank") {
+    if (isHomeUrl(t.url)) {
+      // The start page is rendered by the chrome UI itself, so make sure no
+      // native page webview is left floating on top of it.
       await invoke("close_content", { tabId: t.id }).catch(()=>{});
       return;
     }
@@ -74,29 +84,42 @@ export default function App() {
 
   const resizeRef = useRef<number>(0);
 
-  const debouncedShowContent = useMemo(() => {
-    return (tab?: Tab | null, tabList?: Tab[]) => {
+  // Move the live tab webview to the current viewport without reloading the
+  // page. The native webview is a separate window, so it does not follow CSS
+  // layout (window resize, side panels) on its own.
+  const syncContentBounds = useMemo(() => {
+    return (tab?: Tab | null) => {
+      const t = tab ?? activeTab;
+      const el = viewportRef.current;
+      if (!t || !el) return;
       if (resizeRef.current) {
         window.cancelAnimationFrame(resizeRef.current);
       }
       resizeRef.current = window.requestAnimationFrame(() => {
-        showActiveContent(tab, tabList);
+        const r = el.getBoundingClientRect();
+        if (r.width < 50 || r.height < 50) return;
+        invoke("resize_content", {
+          tabId: t.id,
+          viewport: { x: r.left, y: r.top, width: r.width, height: r.height },
+        }).catch(() => {});
       });
     };
-  }, [activeId, tabs]);
+  }, [activeTab]);
 
   useEffect(() => {
-    const onResize = () => {
-      debouncedShowContent(activeTab, tabs);
-    };
+    if (!activeTab) return;
+    const onResize = () => syncContentBounds(activeTab);
     window.addEventListener("resize", onResize);
+    const observer = new ResizeObserver(onResize);
+    if (viewportRef.current) observer.observe(viewportRef.current);
     return () => {
       window.removeEventListener("resize", onResize);
+      observer.disconnect();
       if (resizeRef.current) {
         window.cancelAnimationFrame(resizeRef.current);
       }
     };
-  }, [activeTab, tabs, debouncedShowContent]);
+  }, [activeTab, syncContentBounds]);
 
   // Update tab loading state when navigation completes
   useEffect(() => {
@@ -118,12 +141,19 @@ export default function App() {
   async function navigateTo(raw: string) {
     if (!activeTab) return;
     try {
-      const url = await invoke<string>("resolve_url", { input: raw });
-      setTabs(ts => ts.map(t => t.id === activeTab.id ? { ...t, url, loading: true, title: url } : t));
-      setAddress(url);
-      await invoke("navigate_tab", { payload: { id: activeTab.id, url, title: url } }).catch(e => console.error("Navigation error:", e));
+      const url = await invoke<string>("resolve_url", { input: raw.trim() || HOME_URL });
+      const home = isHomeUrl(url);
+      const title = home ? "New Tab" : url;
+      setTabs(ts => ts.map(t => t.id === activeTab.id ? { ...t, url, loading: !home, title } : t));
+      setAddress(home ? "" : url);
+      await invoke("navigate_tab", { payload: { id: activeTab.id, url, title } }).catch(e => console.error("Navigation error:", e));
+      if (home) {
+        if (resizeRef.current) window.cancelAnimationFrame(resizeRef.current);
+        await invoke("close_content", { tabId: activeTab.id }).catch(()=>{});
+        return;
+      }
       const vp = await getViewport();
-      if (vp && url && url !== "about:blank") {
+      if (vp && url) {
         await invoke("open_content", { tabId: activeTab.id, url, viewport: vp }).catch(e => console.error("Failed to open content:", e));
       }
     } catch (e) {
@@ -141,7 +171,7 @@ export default function App() {
       return next;
     });
     setActiveId(t.id);
-    setAddress(t.url);
+    setAddress(isHomeUrl(t.url) ? "" : t.url);
   }
 
   async function toggleTabPin(id: string, e: React.MouseEvent) {
@@ -300,17 +330,13 @@ export default function App() {
       <div className="flex-1 flex min-h-0">
         {/* Content viewport host: native child webviews are positioned over this area */}
         <div ref={viewportRef} className="flex-1 relative bg-white">
-          {!activeTab?.url || activeTab.url === "about:blank" ? (
-            <div className={`absolute inset-0 flex flex-col items-center justify-center gap-4 ${dark?"bg-zinc-950 text-zinc-200":"bg-zinc-50 text-zinc-800"}`}>
-              <div className="text-4xl font-bold tracking-tight">RUSTIUM</div>
-              <div className="opacity-70 text-sm">A modern Rust-powered web browser (v0.1 foundation)</div>
-              <form onSubmit={(e)=>{e.preventDefault(); navigateTo(address || settings.homepage);}} className="w-full max-w-xl px-6">
-                <div className={`flex items-center gap-2 px-4 py-3 rounded-full border ${dark?"bg-zinc-900 border-zinc-700":"bg-white border-zinc-300"}`}>
-                  <Search size={16} className="opacity-60"/><input value={address} onChange={e=>setAddress(e.target.value)} className="flex-1 bg-transparent outline-none" placeholder="Search or enter address"/>
-                </div>
-              </form>
-              <div className="text-xs opacity-60 max-w-xl text-center px-6">Real web content renders in managed engine webviews (WebKitGTK/system webview). Some advanced browser features are staged per engine capabilities.</div>
-            </div>
+          {isHomeUrl(activeTab?.url) ? (
+            <HomePage
+              dark={dark}
+              searchEngine={settings.searchEngine}
+              isPrivate={!!activeTab?.isPrivate}
+              onNavigate={navigateTo}
+            />
           ) : (
             <div className={`absolute inset-0 pointer-events-none ${dark?"bg-zinc-950":"bg-white"}`}></div>
           )}

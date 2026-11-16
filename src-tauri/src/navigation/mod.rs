@@ -1,8 +1,16 @@
 use url::Url;
 
+/// Built-in start page rendered by the chrome UI (never a child webview).
+pub const HOME_URL: &str = "rustium://home";
+
 pub fn resolve_input(input: &str, search_engine_prefix: &str) -> String {
     let trimmed = input.trim();
-    if trimmed.is_empty() { return "about:blank".into(); }
+    if trimmed.is_empty() { return HOME_URL.into(); }
+
+    // Built-in pages and their aliases.
+    if trimmed == HOME_URL || trimmed == "about:home" || trimmed == "rustium://newtab" {
+        return HOME_URL.into();
+    }
 
     // Check for protocol
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with("about:") || trimmed.starts_with("file://") {
@@ -76,12 +84,12 @@ mod tests {
 
     #[test]
     fn resolves_https_urls() {
-        assert_eq!(resolve_input("https://example.com", "https://www.google.com/search?q="), "https://example.com");
+        assert_eq!(resolve_input("https://example.com", "https://www.google.com/search?q="), "https://example.com/");
     }
 
     #[test]
     fn resolves_bare_domains() {
-        assert_eq!(resolve_input("example.com", "https://www.google.com/search?q="), "https://example.com");
+        assert_eq!(resolve_input("example.com", "https://www.google.com/search?q="), "https://example.com/");
     }
 
     #[test]
@@ -89,5 +97,15 @@ mod tests {
         let out = resolve_input("rust browser", "https://www.google.com/search?q=");
         assert!(out.starts_with("https://www.google.com/search?q="));
         assert!(out.contains("rust%20browser"));
+    }
+
+    #[test]
+    fn resolves_builtin_home_aliases() {
+        for input in ["rustium://home", "about:home", "rustium://newtab", "  "] {
+            assert_eq!(
+                resolve_input(input, "https://www.google.com/search?q="),
+                super::HOME_URL
+            );
+        }
     }
 }

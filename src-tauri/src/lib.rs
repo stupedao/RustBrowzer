@@ -5,6 +5,8 @@ mod downloads;
 mod engine;
 mod extensions;
 mod history;
+#[cfg(target_os = "linux")]
+mod linux_webview;
 mod navigation;
 mod privacy;
 mod profiles;
@@ -215,6 +217,14 @@ fn open_content(app: tauri::AppHandle, tab_id: String, url: String, viewport: Vi
         let _ = wv.navigate(parsed);
         let _ = wv.set_position(LogicalPosition::new(viewport.x, viewport.y));
         let _ = wv.set_size(LogicalSize::new(viewport.width, viewport.height));
+        #[cfg(target_os = "linux")]
+        {
+            let (x, y, width, height) =
+                (viewport.x, viewport.y, viewport.width, viewport.height);
+            let _ = wv.with_webview(move |pw| {
+                linux_webview::place(&pw.inner(), x, y, width, height);
+            });
+        }
         let _ = wv.show();
         return Ok(());
     }
@@ -236,6 +246,18 @@ fn open_content(app: tauri::AppHandle, tab_id: String, url: String, viewport: Vi
         "#);
     let webview = win.add_child(builder, LogicalPosition::new(viewport.x, viewport.y), LogicalSize::new(viewport.width, viewport.height))
         .map_err(|e| e.to_string())?;
+
+    // `add_child` packed the webview into the window's GtkBox, which stacks
+    // children and ignores their bounds. Move it into the fixed container.
+    #[cfg(target_os = "linux")]
+    {
+        let (x, y, width, height) =
+            (viewport.x, viewport.y, viewport.width, viewport.height);
+        let _ = webview.with_webview(move |pw| {
+            linux_webview::place(&pw.inner(), x, y, width, height);
+        });
+    }
+
     let _ = webview.set_focus();
     Ok(())
 }
@@ -253,6 +275,14 @@ fn resize_content(app: tauri::AppHandle, tab_id: String, viewport: Viewport) -> 
     if let Some(wv) = app.get_webview(&label) {
         let _ = wv.set_position(LogicalPosition::new(viewport.x, viewport.y));
         let _ = wv.set_size(LogicalSize::new(viewport.width, viewport.height));
+        #[cfg(target_os = "linux")]
+        {
+            let (x, y, width, height) =
+                (viewport.x, viewport.y, viewport.width, viewport.height);
+            let _ = wv.with_webview(move |pw| {
+                linux_webview::place(&pw.inner(), x, y, width, height);
+            });
+        }
     }
     Ok(())
 }
@@ -270,15 +300,36 @@ pub fn run() {
     let data_dir = proj.data_dir().to_path_buf();
     std::fs::create_dir_all(&data_dir).ok();
     let db = Database::open(data_dir.join("rustium.db")).expect("db");
-    let settings: BrowserSettings = db
+    let mut settings: BrowserSettings = db
         .get_setting("app_settings")
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
+    // One-time upgrade from the old stock homepage to the built-in start page.
+    if settings.homepage.trim().is_empty() || settings.homepage == "https://example.com" {
+        settings.homepage = navigation::HOME_URL.into();
+        if let Ok(json) = serde_json::to_string(&settings) {
+            let _ = db.set_setting("app_settings", &json);
+        }
+    }
     let state = BrowserState::new(db, settings);
 
     tauri::Builder::default()
         .manage(state)
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            // Linux: give the webviews a GtkFixed container so child webviews
+            // are placed at their bounds instead of being stacked by the
+            // window's default GtkBox.
+            #[cfg(target_os = "linux")]
+            if let Some(win) = app.get_webview_window("main") {
+                match win.default_vbox() {
+                    Ok(vbox) => linux_webview::install(&vbox),
+                    Err(e) => eprintln!("[rustium] linux webview layout unavailable: {e}"),
+                }
+            }
+
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_snapshot, new_tab, close_tab, set_active_tab, update_tab, get_tab,
             list_history, clear_history, list_bookmarks, add_bookmark, remove_bookmark,

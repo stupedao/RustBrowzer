@@ -3172,6 +3172,7 @@ dependencies = [
  "chrono",
  "directories",
  "futures-util",
+ "gtk",
  "open",
  "parking_lot",
  "reqwest 0.12.28",

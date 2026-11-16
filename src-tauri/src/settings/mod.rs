@@ -19,7 +19,7 @@ impl Default for BrowserSettings {
         Self {
             theme: "dark".into(),
             search_engine: "https://www.google.com/search?q=".into(),
-            homepage: "https://example.com".into(),
+            homepage: crate::navigation::HOME_URL.into(),
             download_dir: None,
             startup_behavior: "homepage".into(),
             show_bookmarks_bar: true,
