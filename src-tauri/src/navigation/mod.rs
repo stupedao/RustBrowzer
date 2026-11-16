@@ -6,19 +6,19 @@ pub fn resolve_input(input: &str, search_engine_prefix: &str) -> String {
 
     // Check for protocol
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") || trimmed.starts_with("about:") || trimmed.starts_with("file://") {
-        return sanitize_url(trimmed);
+        return sanitize_url(trimmed).unwrap_or_else(|_| "about:blank".into());
     }
 
     // Check for domain with dot
     if trimmed.contains('.') && !trimmed.contains(' ') {
-        if Url::parse(&format!("https://{}", trimmed)).is_ok() {
-            return sanitize_url(&format!("https://{}", trimmed));
+        if let Ok(sanitized) = sanitize_url(&format!("https://{}", trimmed)) {
+            return sanitized;
         }
     }
 
     // Try to parse as URL
     if let Ok(parsed) = Url::parse(trimmed) {
-        return sanitize_url(&parsed.to_string());
+        return sanitize_url(&parsed.to_string()).unwrap_or_else(|_| "about:blank".into());
     }
 
     // Otherwise, treat as search query
@@ -26,24 +26,20 @@ pub fn resolve_input(input: &str, search_engine_prefix: &str) -> String {
 }
 
 /// Sanitize URL to prevent XSS and ensure safety
-fn sanitize_url(input: &str) -> String {
+pub fn sanitize_url(input: &str) -> Result<String, String> {
     // Basic sanitization - only allow safe protocols and characters
     if let Ok(url) = Url::parse(input) {
         // Only allow safe schemes
         match url.scheme() {
-            "http" | "https" | "about" | "file" => {
-                // Check hostname is valid
-                if let Some(host) = url.host_str() {
-                    // Allow localhost and valid domain names
-                    if host == "localhost" || host.contains('.') {
-                        return url.to_string();
-                    }
-                }
+            "http" | "https" | "about" => return Ok(url.to_string()),
+            "file" => {
+                // Allow file URLs as-is (parsed)
+                return Ok(url.to_string());
             }
             _ => {}
         }
     }
-    "about:blank".to_string()
+    Err(format!("Invalid or unsupported URL: {}", input))
 }
 
 /// Encode search query to prevent XSS

@@ -36,7 +36,7 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "category": "Browser",
+    "category": "Utility",
     "shortDescription": "RUSTIUM - a modern Rust-powered web browser",
     "longDescription": "RUSTIUM is a modular desktop web browser built with Rust and Tauri."
   }

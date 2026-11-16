@@ -73,7 +73,6 @@ export default function App() {
   }, [activeId]);
 
   const resizeRef = useRef<number>(0);
-  const navigateDebounceRef = useRef<number>(0);
 
   const debouncedShowContent = useMemo(() => {
     return (tab?: Tab | null, tabList?: Tab[]) => {

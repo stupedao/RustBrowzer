@@ -79,11 +79,9 @@ fn close_tab(state: State<'_, Arc<BrowserState>>, id: String) -> Option<String> 
 
 #[tauri::command]
 fn set_active_tab(state: State<'_, Arc<BrowserState>>, id: String) {
-    let mut tabs = state.tabs.lock().ok();
-    if let Some(ref mut tabs) = tabs {
-        if tabs.tabs.iter().any(|t| t.id == id) {
-            tabs.active_tab_id = Some(id);
-        }
+    let mut tabs = state.tabs.lock();
+    if tabs.tabs.iter().any(|t| t.id == id) {
+        tabs.active_tab_id = Some(id);
     }
 }
 
@@ -99,17 +97,15 @@ fn toggle_tab_mute(state: State<'_, Arc<BrowserState>>, id: String) -> Result<()
 
 #[tauri::command]
 fn update_tab(state: State<'_, Arc<BrowserState>>, tab: Tab) {
-    let mut tabs = state.tabs.lock().ok();
-    if let Some(ref mut tabs) = tabs {
-        if let Some(t) = tabs.tabs.iter_mut().find(|t| t.id == tab.id) {
-            *t = tab;
-        }
+    let mut tabs = state.tabs.lock();
+    if let Some(t) = tabs.tabs.iter_mut().find(|t| t.id == tab.id) {
+        *t = tab;
     }
 }
 
 #[tauri::command]
 fn get_tab(state: State<'_, Arc<BrowserState>>, id: String) -> Result<Tab, String> {
-    let tabs = state.tabs.lock().ok().ok_or_else(|| "Failed to lock tabs".to_string())?;
+    let tabs = state.tabs.lock();
     tabs.tabs.iter()
         .find(|t| t.id == id)
         .cloned()
@@ -138,9 +134,7 @@ fn navigate_tab(state: State<'_, Arc<BrowserState>>, payload: NavigatePayload) {
 
 #[tauri::command]
 fn list_history(state: State<'_, Arc<BrowserState>>, limit: Option<i64>) -> Vec<serde_json::Value> {
-    let conn = state.db.conn.lock().ok().unwrap_or_else(|| {
-        Connection::open_in_memory().unwrap()
-    });
+    let conn = state.db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let lim = limit.unwrap_or(100); // Reduced from 200 to 100 for better performance
     let mut stmt = conn.prepare("SELECT id,title,url,visited_at FROM history ORDER BY visited_at DESC LIMIT ?1").unwrap();
     let rows = stmt.query_map(rusqlite::params![lim], |r| {
@@ -161,9 +155,7 @@ struct Bookmark { id: String, title: String, url: String, folder: Option<String>
 
 #[tauri::command]
 fn list_bookmarks(state: State<'_, Arc<BrowserState>>) -> Vec<Bookmark> {
-    let conn = state.db.conn.lock().ok().unwrap_or_else(|| {
-        Connection::open_in_memory().unwrap()
-    });
+    let conn = state.db.conn.lock().unwrap_or_else(|e| e.into_inner());
     let mut stmt = conn.prepare("SELECT id,title,url,folder,created_at FROM bookmarks ORDER BY created_at DESC LIMIT 100").unwrap();
     let rows = stmt.query_map([], |r| Ok(Bookmark{ id:r.get(0)?, title:r.get(1)?, url:r.get(2)?, folder:r.get(3)?, created_at:r.get(4)? })).unwrap();
     rows.filter_map(Result::ok).collect()

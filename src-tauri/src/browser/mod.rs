@@ -26,7 +26,7 @@ impl BrowserState {
     }
 
     pub fn toggle_tab_pin(&self, tab_id: String) -> Result<(), String> {
-        let mut tabs = self.tabs.lock().map_err(|e| format!("Failed to lock tabs: {}", e))?;
+        let mut tabs = self.tabs.lock();
         let tab = tabs.tabs.iter_mut().find(|t| t.id == tab_id)
             .ok_or_else(|| format!("Tab not found: {}", tab_id))?;
         tab.toggle_pinned();
@@ -34,7 +34,7 @@ impl BrowserState {
     }
 
     pub fn toggle_tab_mute(&self, tab_id: String) -> Result<(), String> {
-        let mut tabs = self.tabs.lock().map_err(|e| format!("Failed to lock tabs: {}", e))?;
+        let mut tabs = self.tabs.lock();
         let tab = tabs.tabs.iter_mut().find(|t| t.id == tab_id)
             .ok_or_else(|| format!("Tab not found: {}", tab_id))?;
         tab.toggle_muted();
