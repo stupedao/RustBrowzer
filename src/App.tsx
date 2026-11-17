@@ -1,399 +1,885 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import {
-  ArrowLeft, ArrowRight, RotateCw, Home, Star, Puzzle, Download, UserCircle2,
-  Settings, Plus, X, Shield, Search, History, Moon, Sun, Lock, Globe, Pin, VolumeX
+  memo, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent,
+} from "react";
+import { listen } from "@tauri-apps/api/event";
+import {
+  ArrowLeft, ArrowRight, RotateCw, Home, Star, StarOff, Download, Settings as SettingsIcon,
+  Plus, X, Search, History as HistoryIcon, Moon, Sun, Lock, Globe, Pin, VolumeX,
+  Volume2, Clock, BookmarkIcon, Trash2, ExternalLink, ShieldCheck, EyeOff, Square,
 } from "lucide-react";
 import HomePage from "./Home";
+import {
+  useBrowser, isHomeUrl, isSecureUrl, displayUrl,
+  type Tab, type Suggestion, type HistoryEntry, type Bookmark, type DownloadItem,
+} from "./browser";
 
-const HOME_URL = "rustium://home";
+/* ------------------------------------------------------------------ */
+/* Small shared bits                                                   */
+/* ------------------------------------------------------------------ */
 
-/** True for the built-in start page and any empty/new-tab state. */
-function isHomeUrl(url?: string | null) {
-  return !url || url === "about:blank" || url === HOME_URL || url === "about:home";
+function IconButton(props: {
+  title: string; onClick: (e: ReactMouseEvent) => void; disabled?: boolean; children: React.ReactNode;
+  active?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      title={props.title}
+      onClick={props.onClick}
+      disabled={props.disabled}
+      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors
+        ${props.disabled ? "opacity-30" : "hover:bg-black/10 dark:hover:bg-white/10"}
+        ${props.active ? "text-sky-500" : ""}`}
+    >
+      {props.children}
+    </button>
+  );
 }
 
-type Tab = {
-  id: string; title: string; url: string; loading: boolean; pinned: boolean; muted: boolean;
-  isPrivate: boolean; canGoBack: boolean; canGoForward: boolean;
-};
-type TabState = { tabs: Tab[]; activeTabId: string | null; closedTabs: Tab[] };
-type SettingsT = { theme: string; searchEngine: string; homepage: string; showBookmarksBar: boolean };
+/** Toast notifications. */
+function Toasts({ toast }: { toast: { message: string; kind: "success" | "error" } | null }) {
+  if (!toast) return null;
+  return (
+    <div
+      role="status"
+      className={`fixed bottom-4 right-4 z-50 rounded-xl px-4 py-2.5 text-sm font-medium text-white shadow-xl
+        ${toast.kind === "success" ? "bg-emerald-600" : "bg-red-600"}`}
+    >
+      {toast.message}
+    </div>
+  );
+}
 
-function isSecure(url: string) { return url.startsWith("https://") || url.startsWith("about:") || url.startsWith("tauri:") || url.startsWith("rustium:"); }
+/* ------------------------------------------------------------------ */
+/* Tab strip                                                           */
+/* ------------------------------------------------------------------ */
 
-export default function App() {
-  const [tabs, setTabs] = useState<Tab[]>([]);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [settings, setSettings] = useState<SettingsT>({ theme: "dark", searchEngine: "https://www.google.com/search?q=", homepage: HOME_URL, showBookmarksBar: true });
-  const [address, setAddress] = useState("");
-  const [panel, setPanel] = useState<"none"|"history"|"bookmarks"|"downloads"|"settings">("none");
-  const [history, setHistory] = useState<any[]>([]);
-  const [bookmarks, setBookmarks] = useState<any[]>([]);
-  const [refreshing, setRefreshing] = useState(false);
-  const viewportRef = useRef<HTMLDivElement>(null);
-  const activeTab = useMemo(() => tabs.find(t => t.id === activeId) || null, [tabs, activeId]);
+const TabChip = memo(function TabChip(props: {
+  tab: Tab;
+  active: boolean;
+  dark: boolean;
+  onSelect: () => void;
+  onClose: () => void;
+  onPin: () => void;
+  onMute: () => void;
+  onContextMenu: (e: ReactMouseEvent) => void;
+}) {
+  const { tab, active } = props;
+  return (
+    <div
+      onClick={props.onSelect}
+      onAuxClick={(e) => { if (e.button === 1) { e.preventDefault(); props.onClose(); } }}
+      onContextMenu={props.onContextMenu}
+      title={`${tab.title}\n${tab.url}`}
+      className={`group flex h-9 min-w-[120px] max-w-[240px] shrink-0 cursor-pointer select-none items-center gap-1.5 rounded-t-lg px-2.5 text-xs
+        border-x border-t transition-colors
+        ${active
+          ? props.dark
+            ? "border-zinc-700 bg-zinc-800 text-zinc-100"
+            : "border-zinc-300 bg-white text-zinc-900"
+          : props.dark
+            ? "border-transparent bg-zinc-900/60 text-zinc-400 hover:bg-zinc-900"
+            : "border-transparent bg-zinc-200/60 text-zinc-600 hover:bg-zinc-200"}`}
+    >
+      {tab.isPrivate ? <EyeOff size={12} className="shrink-0 text-violet-400" />
+        : isSecureUrl(tab.url) ? <Lock size={12} className="shrink-0 text-emerald-500" />
+        : <Globe size={12} className="shrink-0 opacity-50" />}
+      {tab.pinned && <Pin size={11} className="shrink-0 text-amber-500" />}
+      {tab.muted && <VolumeX size={11} className="shrink-0 text-red-400" />}
+      {tab.loading && <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-sky-400" />}
+      <span className="min-w-0 flex-1 truncate">{tab.title || "New Tab"}</span>
+      <button
+        type="button"
+        title="Close tab"
+        onClick={(e) => { e.stopPropagation(); props.onClose(); }}
+        className="flex h-5 w-5 shrink-0 items-center justify-center rounded opacity-0 transition-opacity hover:bg-black/20 dark:hover:bg-white/20 group-hover:opacity-100"
+      >
+        <X size={12} />
+      </button>
+    </div>
+  );
+});
 
-  async function refresh() {
-    setRefreshing(true);
-    try {
-      const snap = await invoke<{tabs: TabState, settings: SettingsT}>("get_snapshot");
-      setTabs(snap.tabs.tabs);
-      setActiveId(snap.tabs.activeTabId);
-      setSettings(snap.settings as any);
-      const a = snap.tabs.tabs.find(t => t.id === snap.tabs.activeTabId);
-      if (a) setAddress(isHomeUrl(a.url) ? "" : a.url);
-    } catch (e) {
-      console.error("Failed to refresh:", e);
-      showToast("Failed to refresh", "error");
-    } finally {
-      setRefreshing(false);
-    }
-  }
+/* ------------------------------------------------------------------ */
+/* Omnibox                                                             */
+/* ------------------------------------------------------------------ */
 
-  useEffect(() => { refresh(); }, []);
-  useEffect(() => { if (activeTab) setAddress(isHomeUrl(activeTab.url) ? "" : activeTab.url); }, [activeId]);
+function Omnibox(props: {
+  tab: Tab | null;
+  engineName: string;
+  dark: boolean;
+  onNavigate: (input: string) => void;
+  onSuggest: (input: string) => Promise<Suggestion[]>;
+  bookmarked: boolean;
+  onToggleBookmark: () => void;
+}) {
+  const [value, setValue] = useState("");
+  const [focused, setFocused] = useState(false);
+  const [suggestions, setSuggestions] = useState<Suggestion[]>([]);
+  const [selected, setSelected] = useState(0);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const debounceRef = useRef(0);
 
-  async function getViewport() {
-    const el = viewportRef.current; if (!el) return null;
-    const r = el.getBoundingClientRect();
-    // logical coords relative to window webview
-    return { x: r.left, y: r.top, width: r.width, height: r.height };
-  }
+  const display = props.tab ? displayUrl(props.tab.url) : "";
 
-  // Keep tab metadata for many tabs, but only keep a live webview for the active tab (memory optimized).
-  // Inactive tabs are discarded and reloaded on activation (state within page is not preserved across discard).
-  async function showActiveContent(tab?: Tab | null, tabList?: Tab[]) {
-    const t = tab ?? activeTab;
-    const list = tabList ?? tabs;
-    const vp = await getViewport();
-    if (!t || !vp || vp.width < 50 || vp.height < 50) return;
-    await Promise.all(list.filter(o => o.id !== t.id).map(o => invoke("close_content", { tabId: o.id }).catch(()=>{})));
-    if (isHomeUrl(t.url)) {
-      // The start page is rendered by the chrome UI itself, so make sure no
-      // native page webview is left floating on top of it.
-      await invoke("close_content", { tabId: t.id }).catch(()=>{});
+  // Keep the field in sync with the tab when not editing.
+  useEffect(() => {
+    if (!focused) setValue(display);
+  }, [display, focused]);
+
+  // Focus the omnibox from anywhere (Ctrl+L / accelerator event).
+  useEffect(() => {
+    const focus = () => {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    };
+    const un = listen<string>("accelerator", (e) => {
+      if (e.payload === "accel-focus-omnibox") focus();
+    });
+    return () => { void un.then((f) => f()); };
+  }, []);
+
+  // Debounced suggestions; never fire for empty input.
+  useEffect(() => {
+    window.clearTimeout(debounceRef.current);
+    if (!focused || !value.trim()) {
+      setSuggestions([]);
+      setSelected(0);
       return;
     }
-    await invoke("open_content", { tabId: t.id, url: t.url, viewport: vp }).catch((e)=>console.error(e));
+    debounceRef.current = window.setTimeout(async () => {
+      setSuggestions(await props.onSuggest(value));
+      setSelected(0);
+    }, 90);
+    return () => window.clearTimeout(debounceRef.current);
+  }, [value, focused, props]);
+
+  function commit(input: string) {
+    if (!input.trim()) return;
+    setFocused(false);
+    setSuggestions([]);
+    inputRef.current?.blur();
+    props.onNavigate(input);
   }
 
-  useEffect(() => {
-    showActiveContent();
-  }, [activeId]);
-
-  const resizeRef = useRef<number>(0);
-
-  // Move the live tab webview to the current viewport without reloading the
-  // page. The native webview is a separate window, so it does not follow CSS
-  // layout (window resize, side panels) on its own.
-  const syncContentBounds = useMemo(() => {
-    return (tab?: Tab | null) => {
-      const t = tab ?? activeTab;
-      const el = viewportRef.current;
-      if (!t || !el) return;
-      if (resizeRef.current) {
-        window.cancelAnimationFrame(resizeRef.current);
-      }
-      resizeRef.current = window.requestAnimationFrame(() => {
-        const r = el.getBoundingClientRect();
-        if (r.width < 50 || r.height < 50) return;
-        invoke("resize_content", {
-          tabId: t.id,
-          viewport: { x: r.left, y: r.top, width: r.width, height: r.height },
-        }).catch(() => {});
-      });
-    };
-  }, [activeTab]);
-
-  useEffect(() => {
-    if (!activeTab) return;
-    const onResize = () => syncContentBounds(activeTab);
-    window.addEventListener("resize", onResize);
-    const observer = new ResizeObserver(onResize);
-    if (viewportRef.current) observer.observe(viewportRef.current);
-    return () => {
-      window.removeEventListener("resize", onResize);
-      observer.disconnect();
-      if (resizeRef.current) {
-        window.cancelAnimationFrame(resizeRef.current);
-      }
-    };
-  }, [activeTab, syncContentBounds]);
-
-  // Update tab loading state when navigation completes
-  useEffect(() => {
-    if (!activeTab?.loading) return;
-
-    const timer = setTimeout(async () => {
-      try {
-        // Simulate page load completion
-        const updatedTab = await invoke<Tab>("get_tab", { id: activeTab.id });
-        setTabs(ts => ts.map(t => t.id === activeTab.id ? updatedTab : t));
-      } catch (e) {
-        console.error("Failed to update tab state:", e);
-      }
-    }, 500);
-
-    return () => clearTimeout(timer);
-  }, [activeTab?.loading, activeTab?.id]);
-
-  async function navigateTo(raw: string) {
-    if (!activeTab) return;
-    try {
-      const url = await invoke<string>("resolve_url", { input: raw.trim() || HOME_URL });
-      const home = isHomeUrl(url);
-      const title = home ? "New Tab" : url;
-      setTabs(ts => ts.map(t => t.id === activeTab.id ? { ...t, url, loading: !home, title } : t));
-      setAddress(home ? "" : url);
-      await invoke("navigate_tab", { payload: { id: activeTab.id, url, title } }).catch(e => console.error("Navigation error:", e));
-      if (home) {
-        if (resizeRef.current) window.cancelAnimationFrame(resizeRef.current);
-        await invoke("close_content", { tabId: activeTab.id }).catch(()=>{});
-        return;
-      }
-      const vp = await getViewport();
-      if (vp && url) {
-        await invoke("open_content", { tabId: activeTab.id, url, viewport: vp }).catch(e => console.error("Failed to open content:", e));
-      }
-    } catch (e) {
-      console.error("Navigation failed:", e);
-      // Show error message to user
-      showToast("Failed to navigate: " + (e instanceof Error ? e.message : String(e)), "error");
+  function onKeyDown(e: ReactKeyboardEvent<HTMLInputElement>) {
+    if (e.key === "Escape") {
+      inputRef.current?.blur();
+      setFocused(false);
+      setSuggestions([]);
+      return;
+    }
+    if (suggestions.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      setSelected((s) => (s + 1) % suggestions.length);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      setSelected((s) => (s - 1 + suggestions.length) % suggestions.length);
+    } else if (e.key === "Enter" && selected > 0) {
+      e.preventDefault();
+      const s = suggestions[selected];
+      commit(s.url);
     }
   }
 
-  async function addTab(url?: string, isPrivate=false) {
-    const t = await invoke<Tab>("new_tab", { url: url ?? settings.homepage, isPrivate });
-    setTabs(ts => {
-      const next = [...ts, t];
-      setTimeout(()=>showActiveContent(t, next), 30);
-      return next;
-    });
-    setActiveId(t.id);
-    setAddress(isHomeUrl(t.url) ? "" : t.url);
-  }
-
-  async function toggleTabPin(id: string, e: React.MouseEvent) {
-    e.stopPropagation();
-    await invoke("toggle_tab_pin", { id });
-    await refresh();
-  }
-
-  async function toggleTabMute(id: string, e: React.MouseEvent) {
-    e.stopPropagation();
-    await invoke("toggle_tab_mute", { id });
-    await refresh();
-  }
-
-  async function removeTab(id: string) {
-    await invoke("close_content", { tabId: id }).catch(()=>{});
-    await invoke<string | null>("close_tab", { id });
-    await refresh();
-    showToast("Tab closed", "success");
-  }
-
-  async function selectTab(id: string) {
-    if (id === activeId) return;
-    setActiveId(id);
-    await invoke("set_active_tab", { id });
-  }
-
-  async function loadHistory() { setHistory(await invoke("list_history", { limit: 200 })); }
-  async function loadBookmarks() { setBookmarks(await invoke("list_bookmarks")); }
-  async function addBookmarkCurrent() {
-    if (!activeTab) return;
-    try {
-      await invoke("add_bookmark", { title: activeTab.title || activeTab.url, url: activeTab.url, folder: null });
-      showToast("Bookmark added", "success");
-      if (panel==="bookmarks") loadBookmarks();
-    } catch (e) {
-      showToast("Failed to add bookmark", "error");
-    }
-  }
-
-  async function toggleTheme() {
-    const next = { ...settings, theme: settings.theme === "dark" ? "light" : "dark" };
-    setSettings(next); await invoke("save_settings", { settings: next });
-  }
-
-  const dark = settings.theme !== "light";
-  const bg = dark ? "bg-zinc-950 text-zinc-100" : "bg-zinc-100 text-zinc-900";
-  const chrome = dark ? "bg-zinc-900/95 border-zinc-800" : "bg-white border-zinc-200";
-  const tabIdle = dark ? "bg-zinc-800/60 hover:bg-zinc-800 text-zinc-300" : "bg-zinc-200/70 hover:bg-zinc-200 text-zinc-700";
-  const tabActive = dark ? "bg-zinc-950 text-white shadow" : "bg-white text-zinc-900 shadow";
-
-  // Toast notification system
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-
-  const showToast = (message: string, type: 'success' | 'error') => {
-    setToast({ message, type });
-    setTimeout(() => setToast(null), 3000);
-  };
-
-  // Keyboard shortcuts
-  useEffect(() => {
-    const handleKeyDown = async (e: KeyboardEvent) => {
-      if (e.ctrlKey || e.metaKey) {
-        switch (e.key.toLowerCase()) {
-          case 't':
-            e.preventDefault();
-            await addTab();
-            break;
-          case 'w':
-            e.preventDefault();
-            if (activeId) await removeTab(activeId);
-            break;
-          case 'l':
-            e.preventDefault();
-            const addressInput = document.querySelector('input[type="text"]') as HTMLInputElement;
-            if (addressInput) {
-              addressInput.focus();
-              addressInput.select();
-            }
-            break;
-          case 'b':
-            e.preventDefault();
-            setPanel(p => p === "bookmarks" ? "none" : "bookmarks");
-            loadBookmarks();
-            break;
-        }
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeId]);
+  const showPanel = focused && suggestions.length > 0;
 
   return (
-    <div className={`h-full flex flex-col ${bg}`}>
-      {/* Tab bar */}
-      <div className={`flex items-center gap-1 px-2 pt-2 border-b ${chrome}`}>
-        <div className="flex-1 flex items-center gap-1 overflow-x-auto">
-          {tabs.map(t => (
-            <div key={t.id} onClick={()=>selectTab(t.id)} title={t.title || t.url}
-              className={`group flex items-center gap-2 px-3 py-1.5 rounded-t-lg min-w-[110px] max-w-[240px] shrink-0 cursor-pointer border border-b-0 ${t.id===activeId?tabActive:tabIdle} ${dark?"border-zinc-700":"border-zinc-300"}`}>
-              {isSecure(t.url) ? <Lock size={13} className="text-emerald-400 shrink-0"/> : <Globe size={13} className="shrink-0 opacity-60"/>}
-              {t.pinned && <Pin size={13} className="text-amber-400 shrink-0"/>}
-              {t.muted && <VolumeX size={13} className="text-red-400 shrink-0"/>}
-              <span className="truncate text-xs flex-1">{t.isPrivate?"🕶 ":""}{t.loading ? <span className="inline-block w-1.5 h-1.5 bg-blue-400 rounded-full animate-pulse mr-1"/> : ""}{t.title || t.url || "New Tab"}</span>
-              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button onClick={(e)=>{e.stopPropagation(); toggleTabPin(t.id, e);}} className="hover:bg-zinc-500/20 rounded p-0.5" title="Pin tab"><Pin size={12}/></button>
-                <button onClick={(e)=>{e.stopPropagation(); toggleTabMute(t.id, e);}} className="hover:bg-zinc-500/20 rounded p-0.5" title="Mute tab"><VolumeX size={12}/></button>
-                <button onClick={(e)=>{e.stopPropagation(); removeTab(t.id);}} className="hover:bg-zinc-500/20 rounded p-0.5"><X size={12}/></button>
-              </div>
-            </div>
-          ))}
-          <button onClick={()=>addTab()} className="p-1.5 rounded hover:bg-zinc-500/20" title="New tab (Ctrl+T)"><Plus size={16}/></button>
-        </div>
-        <div className="text-[11px] opacity-60 px-2 whitespace-nowrap" title="Open tabs (active tab rendered live; inactive tabs are suspended to save memory)">{tabs.length} tabs</div>
-      </div>
-
-      {/* Toolbar */}
-      <div className={`flex items-center gap-1.5 px-2 py-2 border-b ${chrome}`}>
-        <button className="p-1.5 rounded hover:bg-zinc-500/20" title="Back" onClick={()=>{ /* engine history wiring v1 */ }}><ArrowLeft size={16}/></button>
-        <button className="p-1.5 rounded hover:bg-zinc-500/20" title="Forward"><ArrowRight size={16}/></button>
-        <button className="p-1.5 rounded hover:bg-zinc-500/20" title="Reload" onClick={()=>activeTab && navigateTo(activeTab.url)}><RotateCw size={16}/></button>
-        <button className="p-1.5 rounded hover:bg-zinc-500/20" title="Home" onClick={()=>navigateTo(settings.homepage)}><Home size={16}/></button>
-
-        <form className="flex-1 flex items-center" onSubmit={(e)=>{e.preventDefault(); navigateTo(address);}}>
-          <div className={`flex items-center gap-2 w-full px-3 py-1.5 rounded-full border ${dark?"bg-zinc-800 border-zinc-700":"bg-zinc-100 border-zinc-300"}`}>
-            {activeTab && isSecure(activeTab.url) ? <Shield size={14} className="text-emerald-400"/> : <Search size={14} className="opacity-60"/>}
-            {refreshing && <RotateCw size={14} className="animate-spin text-blue-400"/>}
-            <input
-              value={address}
-              onChange={e=>setAddress(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter') {
-                  e.preventDefault();
-                  navigateTo(address);
-                }
-              }}
-              className="flex-1 bg-transparent outline-none text-sm"
-              placeholder="Search or enter address"
-              spellCheck={false}
-              autoComplete="off"
-            />
-            <button type="button" onClick={addBookmarkCurrent} title="Bookmark" className="opacity-70 hover:opacity-100"><Star size={14}/></button>
-          </div>
-        </form>
-
-        <button className="p-1.5 rounded hover:bg-zinc-500/20" title="Bookmarks" onClick={()=>{setPanel(p=>p==="bookmarks"?"none":"bookmarks"); loadBookmarks();}}><Star size={16}/></button>
-        <button className="p-1.5 rounded hover:bg-zinc-500/20" title="Downloads" onClick={()=>setPanel(p=>p==="downloads"?"none":"downloads")}><Download size={16}/></button>
-        <button className="p-1.5 rounded hover:bg-zinc-500/20" title="History" onClick={()=>{setPanel(p=>p==="history"?"none":"history"); loadHistory();}}><History size={16}/></button>
-        <button className="p-1.5 rounded hover:bg-zinc-500/20" title="Extensions"><Puzzle size={16}/></button>
-        <button className="p-1.5 rounded hover:bg-zinc-500/20" title="Private window" onClick={()=>addTab(settings.homepage,true)}><UserCircle2 size={16}/></button>
-        <button className="p-1.5 rounded hover:bg-zinc-500/20" title="Settings" onClick={()=>setPanel(p=>p==="settings"?"none":"settings")}><Settings size={16}/></button>
-        <button className="p-1.5 rounded hover:bg-zinc-500/20" title="Theme" onClick={toggleTheme}>{dark?<Sun size={16}/>:<Moon size={16}/>}</button>
-      </div>
-
-      <div className="flex-1 flex min-h-0">
-        {/* Content viewport host: native child webviews are positioned over this area */}
-        <div ref={viewportRef} className="flex-1 relative bg-white">
-          {isHomeUrl(activeTab?.url) ? (
-            <HomePage
-              dark={dark}
-              searchEngine={settings.searchEngine}
-              isPrivate={!!activeTab?.isPrivate}
-              onNavigate={navigateTo}
-            />
-          ) : (
-            <div className={`absolute inset-0 pointer-events-none ${dark?"bg-zinc-950":"bg-white"}`}></div>
-          )}
-        </div>
-
-        {/* Side panel */}
-        {panel !== "none" && (
-          <div className={`w-80 border-l p-3 overflow-auto ${chrome}`}>
-            <div className="flex items-center justify-between mb-3"><div className="font-semibold capitalize">{panel}</div><button onClick={()=>setPanel("none")}><X size={16}/></button></div>
-            {panel==="history" && (
-              <div className="space-y-2">
-                <button className="text-xs px-2 py-1 rounded bg-red-500/20 text-red-300" onClick={async()=>{await invoke("clear_history"); loadHistory(); showToast("History cleared", "success");}}>Clear history</button>
-                {history.length===0 && <div className="text-sm opacity-60">No history yet.</div>}
-                {history.map(h => (
-                  <div key={h.id} className="text-sm p-2 rounded hover:bg-zinc-500/10 cursor-pointer" onClick={()=>navigateTo(h.url)}>
-                    <div className="font-medium truncate">{h.title || h.url}</div>
-                    <div className="text-xs opacity-60 truncate">{h.url}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {panel==="bookmarks" && (
-              <div className="space-y-2">
-                <button className="text-xs px-2 py-1 rounded bg-blue-500/20 text-blue-300" onClick={addBookmarkCurrent}>Bookmark current page</button>
-                {bookmarks.length===0 && <div className="text-sm opacity-60">No bookmarks yet.</div>}
-                {bookmarks.map(b => (
-                  <div key={b.id} className="text-sm p-2 rounded hover:bg-zinc-500/10 flex items-center gap-2">
-                    <div className="flex-1 cursor-pointer" onClick={()=>navigateTo(b.url)}>
-                      <div className="font-medium truncate">{b.title}</div>
-                      <div className="text-xs opacity-60 truncate">{b.url}</div>
-                    </div>
-                    <button onClick={async()=>{await invoke("remove_bookmark",{id:b.id}); loadBookmarks(); showToast("Bookmark removed", "success");}} className="text-xs opacity-70">Remove</button>
-                  </div>
-                ))}
-              </div>
-            )}
-            {panel==="downloads" && <div className="text-sm opacity-70">Downloads manager foundation: backend schema and UI panel scaffolded. File download pipeline integration is staged for engine/network wiring.</div>}
-            {panel==="settings" && (
-              <div className="space-y-3 text-sm">
-                <label className="block">Homepage<input className="mt-1 w-full px-2 py-1 rounded bg-zinc-800 border border-zinc-700" value={settings.homepage} onChange={e=>setSettings({...settings, homepage:e.target.value})}/></label>
-                <label className="block">Search engine prefix<input className="mt-1 w-full px-2 py-1 rounded bg-zinc-800 border border-zinc-700" value={settings.searchEngine} onChange={e=>setSettings({...settings, searchEngine:e.target.value})}/></label>
-                <button className="px-3 py-1.5 rounded bg-emerald-600 text-white" onClick={async()=>{await invoke("save_settings",{settings});}}>Save settings</button>
-                <div className="text-xs opacity-60">RUSTIUM v0.1.0 — Tauri/Wry system webview engine (real rendering). See docs/ARCHITECTURE.md for capabilities and limitations.</div>
-              </div>
-            )}
-          </div>
+    <div className="relative min-w-0 flex-1">
+      <div
+        className={`flex h-9 items-center gap-2 rounded-full border px-3.5 transition-colors
+          ${props.dark
+            ? "border-zinc-700 bg-zinc-800 focus-within:border-sky-500"
+            : "border-zinc-300 bg-zinc-100 focus-within:border-sky-500"}`}
+      >
+        {props.tab && isSecureUrl(props.tab.url) ? (
+          <ShieldCheck size={14} className="shrink-0 text-emerald-500" />
+        ) : props.tab && !isHomeUrl(props.tab.url) ? (
+          <Globe size={14} className="shrink-0 opacity-50" />
+        ) : (
+          <Search size={14} className="shrink-0 opacity-50" />
+        )}
+        <input
+          ref={inputRef}
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          onFocus={(e) => { setFocused(true); e.currentTarget.select(); }}
+          onBlur={() => { setFocused(false); setSuggestions([]); }}
+          onKeyDown={onKeyDown}
+          placeholder={`Search ${props.engineName} or enter address`}
+          spellCheck={false}
+          autoComplete="off"
+          aria-label="Address and search bar"
+          className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:opacity-50"
+        />
+        {props.tab && !isHomeUrl(props.tab.url) && (
+          <button
+            type="button"
+            title={props.bookmarked ? "Remove bookmark" : "Bookmark this page"}
+            onClick={props.onToggleBookmark}
+            className="shrink-0 rounded p-0.5 opacity-60 transition-opacity hover:opacity-100"
+          >
+            {props.bookmarked
+              ? <Star size={14} className="fill-amber-400 text-amber-400" />
+              : <StarOff size={14} />}
+          </button>
         )}
       </div>
 
-      {/* Toast notifications */}
-      {toast && (
-        <div className={`fixed bottom-4 right-4 px-4 py-3 rounded-lg shadow-lg z-50 ${
-          toast.type === 'success' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
-        }`}>
-          {toast.message}
+      {showPanel && (
+        <div
+          onMouseDown={(e) => e.preventDefault()} // keep input focus while clicking
+          className={`absolute inset-x-0 top-11 z-40 overflow-hidden rounded-xl border shadow-2xl
+            ${props.dark ? "border-zinc-700 bg-zinc-800" : "border-zinc-200 bg-white"}`}
+        >
+          {suggestions.map((s, i) => {
+            const icon =
+              s.kind === "openTab" ? <Square size={13} className="text-sky-400" />
+              : s.kind === "bookmark" ? <BookmarkIcon size={13} className="text-amber-400" />
+              : s.kind === "history" ? <Clock size={13} className="opacity-50" />
+              : <Search size={13} className="text-emerald-400" />;
+            const label =
+              s.kind === "search" ? s.query : s.title || s.url;
+            const second =
+              s.kind === "search" ? `${props.engineName} search` : displayUrl(s.url);
+            return (
+              <button
+                key={`${s.kind}-${s.url}-${i}`}
+                type="button"
+                onMouseEnter={() => setSelected(i)}
+                onClick={() => commit(s.url)}
+                className={`flex w-full items-center gap-2.5 px-3.5 py-2 text-left text-sm
+                  ${i === selected ? (props.dark ? "bg-zinc-700/70" : "bg-zinc-100") : ""}
+                  ${i > 0 ? "border-t border-black/5 dark:border-white/5" : ""}`}
+              >
+                <span className="shrink-0">{icon}</span>
+                <span className="min-w-0 flex-1 truncate">{label}</span>
+                <span className="shrink-0 text-xs opacity-40">{second}</span>
+              </button>
+            );
+          })}
         </div>
       )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Side panels                                                         */
+/* ------------------------------------------------------------------ */
+
+type PanelKind = "history" | "bookmarks" | "downloads" | "settings";
+
+function Panel(props: {
+  kind: PanelKind;
+  dark: boolean;
+  onClose: () => void;
+  history: HistoryEntry[];
+  bookmarks: Bookmark[];
+  downloads: DownloadItem[];
+  onNavigate: (url: string) => void;
+  onRemoveBookmark: (id: string) => void;
+  onClearHistory: () => void;
+  settings: ReturnType<typeof useBrowser>["settings"];
+  engines: ReturnType<typeof useBrowser>["engines"];
+  onSaveSettings: (s: NonNullable<ReturnType<typeof useBrowser>["settings"]>) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [draft, setDraft] = useState(props.settings ?? null);
+
+  useEffect(() => { setDraft(props.settings); }, [props.settings]);
+
+  const filteredHistory = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return props.history;
+    return props.history.filter(
+      (h) => h.url.toLowerCase().includes(q) || (h.title ?? "").toLowerCase().includes(q),
+    );
+  }, [props.history, query]);
+
+  const title =
+    props.kind === "history" ? "History"
+    : props.kind === "bookmarks" ? "Bookmarks"
+    : props.kind === "downloads" ? "Downloads"
+    : "Settings";
+
+  return (
+    <aside
+      className={`flex w-80 shrink-0 flex-col border-l
+        ${props.dark ? "border-zinc-800 bg-zinc-900" : "border-zinc-200 bg-white"}`}
+    >
+      <header className="flex items-center justify-between border-b px-3.5 py-2.5"
+        style={{ borderColor: props.dark ? "#27272a" : "#e4e4e7" }}>
+        <h2 className="text-sm font-semibold">{title}</h2>
+        <IconButton title="Close panel" onClick={props.onClose}><X size={15} /></IconButton>
+      </header>
+
+      {props.kind === "history" && (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex items-center gap-2 border-b px-3.5 py-2"
+            style={{ borderColor: props.dark ? "#27272a" : "#e4e4e7" }}>
+            <Search size={13} className="opacity-40" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search history"
+              className="min-w-0 flex-1 bg-transparent text-sm outline-none"
+              spellCheck={false}
+            />
+            <button
+              type="button"
+              title="Clear all history"
+              onClick={props.onClearHistory}
+              className="flex items-center gap-1 rounded-md px-1.5 py-1 text-xs text-red-400 hover:bg-red-500/10"
+            >
+              <Trash2 size={12} /> Clear
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto p-2">
+            {filteredHistory.length === 0 && (
+              <p className="px-2 py-6 text-center text-sm opacity-50">No history yet.</p>
+            )}
+            {filteredHistory.map((h) => (
+              <button
+                key={h.id}
+                type="button"
+                onClick={() => props.onNavigate(h.url)}
+                className="w-full rounded-lg px-2.5 py-2 text-left hover:bg-black/5 dark:hover:bg-white/5"
+              >
+                <div className="truncate text-sm">{h.title || h.url}</div>
+                <div className="truncate text-xs opacity-50">{displayUrl(h.url)}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {props.kind === "bookmarks" && (
+        <div className="min-h-0 flex-1 overflow-auto p-2">
+          {props.bookmarks.length === 0 && (
+            <p className="px-2 py-6 text-center text-sm opacity-50">
+              No bookmarks yet. Star a page to keep it here.
+            </p>
+          )}
+          {props.bookmarks.map((b) => (
+            <div key={b.id} className="group flex items-center gap-1 rounded-lg hover:bg-black/5 dark:hover:bg-white/5">
+              <button
+                type="button"
+                onClick={() => props.onNavigate(b.url)}
+                className="min-w-0 flex-1 px-2.5 py-2 text-left"
+              >
+                <div className="truncate text-sm">{b.title}</div>
+                <div className="truncate text-xs opacity-50">{displayUrl(b.url)}</div>
+              </button>
+              <button
+                type="button"
+                title="Remove bookmark"
+                onClick={() => props.onRemoveBookmark(b.id)}
+                className="mr-1 rounded p-1.5 opacity-0 transition-opacity hover:text-red-400 group-hover:opacity-60"
+              >
+                <Trash2 size={13} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {props.kind === "downloads" && (
+        <div className="min-h-0 flex-1 overflow-auto p-2">
+          {props.downloads.length === 0 && (
+            <p className="px-2 py-6 text-center text-sm opacity-50">No downloads yet.</p>
+          )}
+          {props.downloads.map((d) => (
+            <div key={d.id} className="rounded-lg px-2.5 py-2">
+              <div className="flex items-center gap-2">
+                <Download size={13} className="shrink-0 opacity-50" />
+                <span className="min-w-0 flex-1 truncate text-sm">{d.filename}</span>
+                <span
+                  className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium
+                    ${d.status === "completed" ? "bg-emerald-500/15 text-emerald-400"
+                      : d.status === "failed" ? "bg-red-500/15 text-red-400"
+                      : "bg-sky-500/15 text-sky-400"}`}
+                >
+                  {d.status}
+                </span>
+              </div>
+              <div className="mt-0.5 truncate text-xs opacity-40">{d.path}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {props.kind === "settings" && draft && (
+        <div className="min-h-0 flex-1 space-y-5 overflow-auto p-4 text-sm">
+          <section>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider opacity-50">Appearance</h3>
+            <label className="flex items-center justify-between py-1.5">
+              Theme
+              <select
+                value={draft.theme}
+                onChange={(e) => setDraft({ ...draft, theme: e.target.value })}
+                className={`rounded-lg border px-2 py-1.5 text-sm outline-none
+                  ${props.dark ? "border-zinc-700 bg-zinc-800" : "border-zinc-300 bg-zinc-100"}`}
+              >
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+              </select>
+            </label>
+            <label className="flex items-center justify-between py-1.5">
+              Show bookmarks bar
+              <input
+                type="checkbox"
+                checked={draft.showBookmarksBar}
+                onChange={(e) => setDraft({ ...draft, showBookmarksBar: e.target.checked })}
+                className="h-4 w-4 accent-sky-500"
+              />
+            </label>
+          </section>
+
+          <section>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider opacity-50">Search</h3>
+            <label className="flex items-center justify-between py-1.5">
+              Default engine
+              <select
+                value={draft.defaultEngine}
+                onChange={(e) => setDraft({ ...draft, defaultEngine: e.target.value })}
+                className={`rounded-lg border px-2 py-1.5 text-sm outline-none
+                  ${props.dark ? "border-zinc-700 bg-zinc-800" : "border-zinc-300 bg-zinc-100"}`}
+              >
+                {props.engines.map((e) => (
+                  <option key={e.name} value={e.name}>{e.name}</option>
+                ))}
+              </select>
+            </label>
+            <p className="mt-1.5 text-xs opacity-40">
+              Tip: type an engine keyword first (e.g. “g cats”) to search with another engine.
+            </p>
+          </section>
+
+          <section>
+            <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider opacity-50">Startup</h3>
+            <label className="flex items-center justify-between py-1.5">
+              Homepage
+              <input
+                value={draft.homepage}
+                onChange={(e) => setDraft({ ...draft, homepage: e.target.value })}
+                spellCheck={false}
+                className={`w-40 rounded-lg border px-2 py-1.5 text-sm outline-none
+                  ${props.dark ? "border-zinc-700 bg-zinc-800" : "border-zinc-300 bg-zinc-100"}`}
+              />
+            </label>
+            <label className="flex items-center justify-between py-1.5">
+              Block pop-ups
+              <input
+                type="checkbox"
+                checked={draft.blockPopups}
+                onChange={(e) => setDraft({ ...draft, blockPopups: e.target.checked })}
+                className="h-4 w-4 accent-sky-500"
+              />
+            </label>
+          </section>
+
+          <button
+            type="button"
+            onClick={() => props.onSaveSettings(draft)}
+            className="w-full rounded-lg bg-sky-600 py-2 font-medium text-white transition-colors hover:bg-sky-500"
+          >
+            Save settings
+          </button>
+
+          <p className="text-center text-[11px] leading-relaxed opacity-35">
+            RustBrowzer v0.2.0 · Rust + Tauri · WebKitGTK
+            <br />
+            Only the active tab is kept in memory; switching reloads it.
+          </p>
+        </div>
+      )}
+    </aside>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Tab context menu                                                    */
+/* ------------------------------------------------------------------ */
+
+function ContextMenu(props: {
+  x: number; y: number; tab: Tab; dark: boolean;
+  onClose: () => void;
+  onReload: () => void; onCloseTab: () => void;
+  onPin: () => void; onMute: () => void; onCloseOthers: () => void;
+}) {
+  useEffect(() => {
+    const close = () => props.onClose();
+    window.addEventListener("click", close);
+    window.addEventListener("blur", close);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("blur", close);
+    };
+  }, [props]);
+
+  const item = "flex w-full items-center gap-2.5 rounded-md px-2.5 py-1.5 text-left text-sm hover:bg-black/5 dark:hover:bg-white/10";
+
+  return (
+    <div
+      style={{ position: "fixed", left: props.x, top: props.y, zIndex: 60 } as CSSProperties}
+      onClick={(e) => e.stopPropagation()}
+      className={`w-52 overflow-hidden rounded-xl border p-1 shadow-2xl
+        ${props.dark ? "border-zinc-700 bg-zinc-800 text-zinc-100" : "border-zinc-200 bg-white text-zinc-900"}`}
+    >
+      <button type="button" className={item} onClick={() => { props.onReload(); props.onClose(); }}>
+        <RotateCw size={14} /> Reload
+      </button>
+      <button type="button" className={item} onClick={() => { props.onPin(); props.onClose(); }}>
+        <Pin size={14} /> {props.tab.pinned ? "Unpin tab" : "Pin tab"}
+      </button>
+      <button type="button" className={item} onClick={() => { props.onMute(); props.onClose(); }}>
+        {props.tab.muted ? <Volume2 size={14} /> : <VolumeX size={14} />}
+        {props.tab.muted ? "Unmute tab" : "Mute tab"}
+      </button>
+      <div className="my-1 border-t border-black/10 dark:border-white/10" />
+      <button type="button" className={`${item} text-red-400`} onClick={() => { props.onCloseOthers(); props.onClose(); }}>
+        <X size={14} /> Close other tabs
+      </button>
+      <button type="button" className={`${item} text-red-400`} onClick={() => { props.onCloseTab(); props.onClose(); }}>
+        <X size={14} /> Close tab
+      </button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* App                                                                 */
+/* ------------------------------------------------------------------ */
+
+export default function App() {
+  const browser = useBrowser();
+  const { tabs, activeId, activeTab, settings, engines, actions } = browser;
+  const [panel, setPanel] = useState<PanelKind | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [downloads, setDownloads] = useState<DownloadItem[]>([]);
+  const [bookmarked, setBookmarked] = useState(false);
+  const [toast, setToast] = useState<{ message: string; kind: "success" | "error" } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; tab: Tab } | null>(null);
+  const closedTabsRef = useRef<{ url: string; isPrivate: boolean }[]>([]);
+
+  const dark = settings?.theme !== "light";
+
+  const showToast = (message: string, kind: "success" | "error" = "success") => {
+    setToast({ message, kind });
+    window.setTimeout(() => setToast(null), 2600);
+  };
+
+  // Track recently closed tabs for Ctrl+Shift+T (mirrors backend state).
+  useEffect(() => {
+    const onTabs = (next: Tab[]) => {
+      const urls = new Set(next.map((t) => t.id));
+      // Nothing to do here on add; closure below uses closeTab wrapper.
+      void urls;
+    };
+    onTabs(tabs);
+  }, [tabs]);
+
+  async function handleCloseTab(id: string) {
+    const tab = tabs.find((t) => t.id === id);
+    if (tab) {
+      closedTabsRef.current.unshift({ url: tab.url, isPrivate: tab.isPrivate });
+      closedTabsRef.current = closedTabsRef.current.slice(0, 10);
+    }
+    await actions.closeTab(id);
+  }
+
+  async function handleReopen() {
+    const last = closedTabsRef.current.shift();
+    await actions.reopenTab(last?.url, last?.isPrivate);
+  }
+
+  // Panel data loading (only when the panel is open).
+  useEffect(() => {
+    if (panel === "history") void actions.listHistory(200).then(setHistory);
+    if (panel === "bookmarks") void actions.listBookmarks().then(setBookmarks);
+    if (panel === "downloads") void actions.listDownloads().then(setDownloads);
+  }, [panel, actions]);
+
+  // Keep downloads fresh while the panel is open.
+  useEffect(() => {
+    if (panel !== "downloads") return;
+    const un = listen("downloads-changed", () => {
+      void actions.listDownloads().then(setDownloads);
+    });
+    return () => { void un.then((f) => f()); };
+  }, [panel, actions]);
+
+  // Bookmark star state follows the active tab.
+  useEffect(() => {
+    if (!activeTab || isHomeUrl(activeTab.url)) {
+      setBookmarked(false);
+      return;
+    }
+    void actions.isBookmarked(activeTab.url).then(setBookmarked);
+  }, [activeTab?.url, actions]);
+
+  async function toggleBookmark() {
+    if (!activeTab) return;
+    if (bookmarked) {
+      const b = bookmarks.find((b) => b.url === activeTab.url);
+      if (b) await actions.removeBookmark(b.id);
+      setBookmarked(false);
+      showToast("Bookmark removed");
+    } else {
+      const ok = await actions.addBookmark(activeTab.title || activeTab.url, activeTab.url);
+      setBookmarked(ok);
+      showToast(ok ? "Bookmark added" : "Could not bookmark this page", ok ? "success" : "error");
+      if (ok && panel === "bookmarks") {
+        void actions.listBookmarks().then(setBookmarks);
+      }
+    }
+  }
+
+  // Keyboard shortcuts (work when the UI webview has focus; GTK accelerators
+  // cover the case where web content has focus).
+  useEffect(() => {
+    const onKey = async (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return;
+      const key = e.key.toLowerCase();
+      if (e.shiftKey && key === "t") { e.preventDefault(); await handleReopen(); return; }
+      switch (key) {
+        case "t": e.preventDefault(); await actions.newTab(); break;
+        case "w": e.preventDefault(); if (activeId) await handleCloseTab(activeId); break;
+        case "l": e.preventDefault();
+          (document.querySelector('input[aria-label="Address and search bar"]') as HTMLInputElement | null)?.focus();
+          break;
+        case "r": e.preventDefault(); await actions.reload(); break;
+        case "b": e.preventDefault(); setPanel((p) => (p === "bookmarks" ? null : "bookmarks")); break;
+        case "h": e.preventDefault(); setPanel((p) => (p === "history" ? null : "history")); break;
+        case "j": e.preventDefault(); setPanel((p) => (p === "downloads" ? null : "downloads")); break;
+        case "tab": {
+          e.preventDefault();
+          if (tabs.length < 2) break;
+          const idx = tabs.findIndex((t) => t.id === activeId);
+          const next = tabs[(idx + (e.shiftKey ? -1 : 1) + tabs.length) % tabs.length];
+          await actions.selectTab(next.id);
+          break;
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [actions, activeId, tabs]);
+
+  // Backend accelerator routing (fires when web content had focus).
+  useEffect(() => {
+    const un = listen<string>("accelerator", async (e) => {
+      switch (e.payload) {
+        case "accel-new-tab": await actions.newTab(); break;
+        case "accel-close-tab": if (activeId) await handleCloseTab(activeId); break;
+        case "accel-reopen-tab": await handleReopen(); break;
+        case "accel-reload": await actions.reload(); break;
+        case "accel-toggle-bookmarks": setPanel((p) => (p === "bookmarks" ? null : "bookmarks")); break;
+        case "accel-toggle-history": setPanel((p) => (p === "history" ? null : "history")); break;
+        case "accel-toggle-downloads": setPanel((p) => (p === "downloads" ? null : "downloads")); break;
+      }
+    });
+    return () => { void un.then((f) => f()); };
+  }, [actions, activeId]);
+
+  const engineName = useMemo(() => {
+    const s = settings;
+    return engines.find((e) => e.name === s?.defaultEngine)?.name ?? engines[0]?.name ?? "the web";
+  }, [settings, engines]);
+
+  const chrome = dark ? "border-zinc-800 bg-zinc-900" : "border-zinc-200 bg-zinc-50";
+
+  if (!settings) {
+    // Skeleton while the snapshot loads.
+    return (
+      <div className={`flex h-full items-center justify-center ${dark ? "bg-zinc-950 text-zinc-400" : "bg-zinc-100 text-zinc-500"}`}>
+        <div className="flex items-center gap-2.5 text-sm">
+          <span className="h-4 w-4 animate-pulse rounded-full bg-sky-500" />
+          Starting…
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`flex h-full flex-col ${dark ? "bg-zinc-950 text-zinc-100" : "bg-zinc-100 text-zinc-900"}`}>
+      {/* ---- tab strip ---- */}
+      <div className={`flex items-end gap-0.5 border-b px-2 pt-1.5 ${chrome}`}>
+        <div className="flex min-w-0 flex-1 items-end gap-0.5 overflow-x-auto" style={{ scrollbarWidth: "none" }}>
+          {tabs.map((t) => (
+            <TabChip
+              key={t.id}
+              tab={t}
+              active={t.id === activeId}
+              dark={dark}
+              onSelect={() => void actions.selectTab(t.id)}
+              onClose={() => void handleCloseTab(t.id)}
+              onPin={() => void actions.togglePin(t.id)}
+              onMute={() => void actions.toggleMute(t.id)}
+              onContextMenu={(e) => { e.preventDefault(); setMenu({ x: e.clientX, y: e.clientY, tab: t }); }}
+            />
+          ))}
+          <button
+            type="button"
+            title="New tab (Ctrl+T)"
+            onClick={() => void actions.newTab()}
+            className="mb-0.5 ml-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg opacity-60 transition-opacity hover:opacity-100"
+          >
+            <Plus size={15} />
+          </button>
+        </div>
+        <button
+          type="button"
+          title="New private tab"
+          onClick={() => void actions.newTab(undefined, true)}
+          className="mb-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg opacity-60 transition-opacity hover:opacity-100"
+        >
+          <EyeOff size={14} />
+        </button>
+      </div>
+
+      {/* ---- toolbar ---- */}
+      <div className={`flex items-center gap-1 border-b px-2 py-1.5 ${chrome}`}>
+        <IconButton title="Back (Alt+←)" disabled={!activeTab?.canGoBack} onClick={() => void actions.goBack()}>
+          <ArrowLeft size={16} />
+        </IconButton>
+        <IconButton title="Forward (Alt+→)" disabled={!activeTab?.canGoForward} onClick={() => void actions.goForward()}>
+          <ArrowRight size={16} />
+        </IconButton>
+        {activeTab?.loading ? (
+          <IconButton title="Stop loading" onClick={() => void actions.stop()}><Square size={14} /></IconButton>
+        ) : (
+          <IconButton title="Reload (Ctrl+R)" disabled={!activeTab || isHomeUrl(activeTab.url)} onClick={() => void actions.reload()}>
+            <RotateCw size={15} />
+          </IconButton>
+        )}
+        <IconButton title="Home" onClick={() => void actions.navigate("browser://home")}>
+          <Home size={15} />
+        </IconButton>
+
+        <Omnibox
+          tab={activeTab}
+          engineName={engineName}
+          dark={dark}
+          onNavigate={(input) => void actions.navigate(input)}
+          onSuggest={actions.suggest}
+          bookmarked={bookmarked}
+          onToggleBookmark={() => void toggleBookmark()}
+        />
+
+        <IconButton title="Bookmarks (Ctrl+B)" active={panel === "bookmarks"}
+          onClick={() => setPanel((p) => (p === "bookmarks" ? null : "bookmarks"))}>
+          <Star size={15} />
+        </IconButton>
+        <IconButton title="History (Ctrl+H)" active={panel === "history"}
+          onClick={() => setPanel((p) => (p === "history" ? null : "history"))}>
+          <HistoryIcon size={15} />
+        </IconButton>
+        <IconButton title="Downloads (Ctrl+J)" active={panel === "downloads"}
+          onClick={() => setPanel((p) => (p === "downloads" ? null : "downloads"))}>
+          <Download size={15} />
+        </IconButton>
+        <IconButton
+          title={dark ? "Light theme" : "Dark theme"}
+          onClick={() => void actions.saveSettings({ ...settings, theme: dark ? "light" : "dark" })}
+        >
+          {dark ? <Sun size={15} /> : <Moon size={15} />}
+        </IconButton>
+        <IconButton title="Settings" active={panel === "settings"}
+          onClick={() => setPanel((p) => (p === "settings" ? null : "settings"))}>
+          <SettingsIcon size={15} />
+        </IconButton>
+      </div>
+
+      {/* ---- bookmarks bar ---- */}
+      {settings.showBookmarksBar && bookmarks.length > 0 && (
+        <div className={`flex items-center gap-1 overflow-x-auto border-b px-2 py-1 text-xs ${chrome}`}
+          style={{ scrollbarWidth: "none" }}>
+          <button type="button" onClick={() => void actions.listBookmarks().then(setBookmarks)}
+            className="shrink-0 rounded px-1.5 py-0.5 opacity-50 hover:opacity-100" title="Refresh">
+            <BookmarkIcon size={12} />
+          </button>
+          {bookmarks.slice(0, 12).map((b) => (
+            <button
+              key={b.id}
+              type="button"
+              title={b.url}
+              onClick={() => void actions.navigate(b.url)}
+              className="flex max-w-[160px] shrink-0 items-center gap-1.5 rounded-md px-2 py-1 transition-colors hover:bg-black/10 dark:hover:bg-white/10"
+            >
+              <ExternalLink size={11} className="shrink-0 opacity-40" />
+              <span className="truncate">{b.title}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* ---- content + panel ---- */}
+      <div className="flex min-h-0 flex-1">
+        <div ref={browser.viewportRef} className="relative min-w-0 flex-1">
+          {(!activeTab || isHomeUrl(activeTab.url)) ? (
+            <HomePage
+              dark={dark}
+              engineName={engineName}
+              isPrivate={!!activeTab?.isPrivate}
+              onNavigate={(input) => void actions.navigate(input)}
+            />
+          ) : (
+            /* The native webview renders on top of this host; this element
+               only sets the background while switching. */
+            <div className={`absolute inset-0 ${dark ? "bg-zinc-900" : "bg-white"}`} />
+          )}
+        </div>
+
+        {panel && (
+          <Panel
+            kind={panel}
+            dark={dark}
+            onClose={() => setPanel(null)}
+            history={history}
+            bookmarks={bookmarks}
+            downloads={downloads}
+            onNavigate={(url) => void actions.navigate(url)}
+            onRemoveBookmark={async (id) => {
+              await actions.removeBookmark(id);
+              setBookmarks(await actions.listBookmarks());
+              showToast("Bookmark removed");
+            }}
+            onClearHistory={async () => {
+              await actions.clearHistory();
+              setHistory([]);
+              showToast("History cleared");
+            }}
+            settings={settings}
+            engines={engines}
+            onSaveSettings={async (s) => {
+              const ok = await actions.saveSettings(s);
+              showToast(ok ? "Settings saved" : "Could not save settings", ok ? "success" : "error");
+            }}
+          />
+        )}
+      </div>
+
+      {menu && (
+        <ContextMenu
+          x={menu.x} y={menu.y} tab={menu.tab} dark={dark}
+          onClose={() => setMenu(null)}
+          onReload={() => void actions.reload(menu.tab.id)}
+          onCloseTab={() => void handleCloseTab(menu.tab.id)}
+          onPin={() => void actions.togglePin(menu.tab.id)}
+          onMute={() => void actions.toggleMute(menu.tab.id)}
+          onCloseOthers={async () => {
+            for (const t of tabs.filter((t) => t.id !== menu.tab.id)) {
+              await actions.closeTab(t.id);
+            }
+          }}
+        />
+      )}
+
+      <Toasts toast={toast} />
     </div>
   );
 }

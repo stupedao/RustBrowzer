@@ -1,10 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Capability of the browser UI webview only. Content webviews (labels starting with 'c') are remote origins and are granted nothing; commands additionally verify the caller label at runtime.",
   "windows": ["main"],
+  "webviews": ["main"],
+  "local": true,
   "permissions": [
-    "core:default",
-    "opener:default"
+    "core:default"
   ]
 }

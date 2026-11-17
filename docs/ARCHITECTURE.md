@@ -1,53 +1,61 @@
-# RUSTIUM Architecture
+# Architecture
 
-## Phase 1 — Engine & Desktop Integration Selection
+## Rendering model
 
-### Goal
-Build a genuinely functional desktop web browser with **real website rendering**, not a mock UI. Rust must own core application logic, with a modular engine abstraction so rendering backends can evolve.
+The browser chrome is the window's own webview (label `main`). Real pages are
+separate *content webviews* created with `Window::add_child` (unstable API) and
+positioned over the content viewport.
 
-### Options Evaluated
+`WebviewManager` (src-tauri/src/renderer/mod.rs) owns the live set:
 
-| Option | Rendering | Pros | Cons | Verdict |
-|---|---|---|---|---|
-| **Tauri 2 + system WebView (WRY/WebKitGTK on Linux)** | Real engine (WebKitGTK 4.1 on Linux, WKWebView on macOS, WebView2/Chromium on Windows) | Fast to ship, real rendering, Rust-native shell, small footprint, cross-platform packaging via Tauri, leverages OS-updated engines | Not a custom/bundled Chromium build; extension model not Chrome-Web-Store-compatible; per-engine capability differences; multi-webview tab management requires careful window/webview composition | **Selected for v1** |
-| **Chromium Embedded Framework (CEF)** | Bundled Chromium | Closest to Chrome behavior, strong extension/DevTools potential | Large binaries/build complexity, heavy integration effort, licensing/distribution overhead, longer path to a first launchable browser | Future backend target |
-| **Servo embedding** | Servo engine | Rust-native engine, promising architecture | Embedding ecosystem immature for full browser product features, site compatibility gaps | Future/experimental backend target |
-| **Build engine from scratch** | Custom | Full control | Unrealistic for v1; would prevent real rendering for years | Rejected |
+- `show(tab, viewport)` — evicts all other live webviews (LRU), then reuses or
+  creates the tab's webview at the viewport bounds.
+- `max_live = 1` — the memory budget. Raising it later is a one-line change;
+  eviction is already implemented and stamped.
+- Labels are derived from tab ids (`c<uuid-no-dashes>`), so a stale webview can
+  never be mistaken for a live one.
 
-### Selected Architecture (v1)
+On Linux, `add_child` packs child webviews into the window's `GtkBox` (stacking
+them). `linux_webview.rs` installs a `GtkFixed` container and moves every
+webview into it so bounds are honored; it also installs window accelerators.
 
-- **Shell/Desktop:** Tauri 2 (Rust backend + WebView host)
-- **UI chrome:** React + TypeScript + Tailwind CSS rendered in the main application webview
-- **Content rendering:** Real web content rendered by the platform/system webview engine through managed content webviews (WebKitGTK 4.1 detected on this Linux environment). This is **not** presented as a custom Chromium engine.
-- **Core logic (Rust):** tabs/navigation state, bookmarks, history, downloads, settings, profiles/privacy/session policy, permissions model, persistence, command/event IPC.
-- **Persistence:** SQLite (via `rusqlite`/`sqlx`-style access as implemented) for history, bookmarks, downloads, settings, sessions metadata.
-- **Async/runtime:** Tokio for background tasks (downloads, DB writes, maintenance) with careful UI-thread boundaries.
-- **Engine abstraction:** `engine` module defines traits/interfaces for navigation, tab lifecycle, permissions, and capability reporting so CEF/Servo adapters can be added later without rewriting product logic.
+## Lifecycle
 
-### Key Limitations (honest)
+All tab state lives in Rust (`state.rs`). The UI is a projection: it receives
+`tabs-changed` events and issues commands. Page events flow through wry hooks
+into typed events (`load-started`, `load-finished`, `title-changed`,
+`url-changed`, `tab-discarded`, `downloads-changed`), all emitted *to the UI
+webview only*.
 
-- v1 cannot guarantee Chrome-identical rendering or full Chromium extension compatibility because it uses the system webview engine per platform.
-- Some features depend on engine support (e.g., true process-per-tab isolation controls, extension APIs, granular permission prompts). Unsupported capabilities must be reported in UI and handled via best realistic alternatives.
-- Advanced protections (site isolation internals, full Safe Browsing parity) may be partial in v1; security defaults remain strict (TLS verification never disabled).
+Back/forward: because inactive tabs are discarded, Rust keeps per-tab URL
+stacks and re-materializes the webview on navigation.
 
-### Modular Boundaries
+## Security
 
-- `browser/` — app orchestration and command handlers
-- `engine/` — engine abstraction + Tauri/WebView adapter
-- `tabs/` — tab model, ordering, groups, session restore state
-- `navigation/` — omnibox resolution, URL/search handling
-- `bookmarks/`, `history/`, `downloads/` — domain logic
-- `privacy/`, `security/`, `profiles/` — policies and permission state
-- `database/` — schema, migrations, repositories
-- `settings/` — typed settings and defaults
-- `extensions/` — extension management architecture/capability layer
+1. Capability file grants `core:default` to webview `main` only; content
+   webviews are remote origins → no IPC at all (verified against Tauri
+   2.12.5 ACL resolution: `webviews || windows` glob matching).
+2. Every command re-checks the caller webview label (`assert_ui_origin`).
+3. `sanitize_url` allows only `http/https` with a host — everywhere, including
+   bookmarks and the homepage setting.
+4. `on_navigation` blocks non-web schemes mid-load (file:, custom schemes…).
+5. `on_new_window` denies popups/target=_blank.
+6. Private tabs: `incognito(true)` → ephemeral WebKit session, no DB writes.
+7. Downloads: filename sanitized, redirected into the downloads dir,
+   never overwrites existing files.
+8. No initialization scripts are injected into web content; the old fake
+   "CSP meta tag" injection (which did nothing) was removed — the UI's CSP
+   comes from tauri.conf.json + index.html.
 
-### Incremental Delivery Strategy
+## Performance
 
-1. Scaffold Rustium app shell and DB.
-2. Implement tab/navigation model + real content rendering for at least core browsing flows.
-3. Add persistence features (history/bookmarks/downloads/settings).
-4. Add privacy/private mode and permission plumbing.
-5. Complete UI/UX, tests, packaging, docs.
-
-This document will be updated as implementation validates engine capabilities.
+- One live webview (bounded RAM/CPU).
+- CPU rendering forced: WEBKIT_DISABLE_COMPOSITING_MODE=1,
+  WEBKIT_DISABLE_DMABUF_RENDERER=1, LIBGL_ALWAYS_SOFTWARE=1 (set in main.rs
+  before toolkit init; user-set values are respected).
+- No polling anywhere; ResizeObserver + rAF-debounced bounds sync.
+- SQLite: WAL, synchronous=NORMAL, busy_timeout, prepared statements,
+  history deduped by URL with visit counts, capped at 5000 rows.
+- UI: memoized tab chips, minute-aligned clock, no infinite animations,
+  no large blur radii, contained re-renders.
+- Release profile: opt-level "s", LTO, single codegen unit, strip.

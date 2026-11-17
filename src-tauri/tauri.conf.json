@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "RUSTIUM",
-  "version": "0.1.0",
-  "identifier": "com.rustium.browser",
+  "productName": "RustBrowzer",
+  "version": "0.2.0",
+  "identifier": "com.rustbrowzer.app",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,17 +13,18 @@
     "windows": [
       {
         "label": "main",
-        "title": "RUSTIUM",
+        "title": "RustBrowzer",
         "width": 1280,
         "height": 860,
-        "minWidth": 900,
-        "minHeight": 600,
+        "minWidth": 700,
+        "minHeight": 500,
         "decorations": true,
-        "resizable": true
+        "resizable": true,
+        "center": true
       }
     ],
     "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data: https: http:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost https: http:; frame-src https: http:;"
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'self'; form-action 'self'"
     }
   },
   "bundle": {
@@ -36,8 +37,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "category": "Utility",
-    "shortDescription": "RUSTIUM - a modern Rust-powered web browser",
-    "longDescription": "RUSTIUM is a modular desktop web browser built with Rust and Tauri."
+    "category": "Network",
+    "shortDescription": "RustBrowzer - a fast, private browser",
+    "longDescription": "RustBrowzer is a lightweight desktop web browser built with Rust and Tauri."
   }
 }

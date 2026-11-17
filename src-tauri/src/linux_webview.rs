@@ -37,7 +37,7 @@ mod imp {
 
     #[glib::object_subclass]
     impl ObjectSubclass for WebviewContainer {
-        const NAME: &'static str = "RustiumWebviewContainer";
+        const NAME: &'static str = "RustBrowzerWebviewContainer";
         type Type = super::WebviewContainer;
         type ParentType = gtk::Fixed;
     }
@@ -172,4 +172,55 @@ pub fn place<W: IsA<gtk::Widget>>(widget: &W, x: f64, y: f64, width: f64, height
         }
         widget.show_all();
     });
+}
+
+/// Install window-level keyboard accelerators (Ctrl+T / Ctrl+W / Ctrl+L /
+/// Ctrl+Shift+T / Ctrl+Tab …) that keep working even while a web page holds
+/// keyboard focus. GTK routes accelerators before the focus widget.
+pub fn install_accelerators(window: &tauri::WebviewWindow, app: tauri::AppHandle) {
+    use gtk::prelude::GtkWindowExt;
+
+    let Ok(gtk_window) = window.gtk_window() else {
+        return;
+    };
+    let accel = gtk::AccelGroup::new();
+    gtk_window.add_accel_group(&accel);
+
+    const CTRL: gtk::gdk::ModifierType = gtk::gdk::ModifierType::CONTROL_MASK;
+    const CTRL_SHIFT: gtk::gdk::ModifierType =
+        gtk::gdk::ModifierType::CONTROL_MASK | gtk::gdk::ModifierType::SHIFT_MASK;
+
+    // (key, mods, action) — action names are understood by the UI webview.
+    const BINDINGS: &[(char, gtk::gdk::ModifierType, &str)] = &[
+        ('t', CTRL, "accel-new-tab"),
+        ('w', CTRL, "accel-close-tab"),
+        ('l', CTRL, "accel-focus-omnibox"),
+        ('t', CTRL_SHIFT, "accel-reopen-tab"),
+        ('r', CTRL, "accel-reload"),
+        ('b', CTRL, "accel-toggle-bookmarks"),
+        ('h', CTRL, "accel-toggle-history"),
+        ('j', CTRL, "accel-toggle-downloads"),
+    ];
+
+    for &(ch, mods, action) in BINDINGS {
+        let key = ch.to_ascii_lowercase() as u32;
+        let app = app.clone();
+        let action = action.to_string();
+        accel.connect_accel_group(
+            key,
+            mods,
+            gtk::AccelFlags::empty(),
+            move |_group, _obj, _key, _mods| {
+                use tauri::Emitter;
+                // Route the shortcut into the UI webview, which owns the
+                // keyboard handling logic. Content webviews never see it.
+                let _ = app.emit_to(
+                    crate::renderer::UI_LABEL,
+                    "accelerator",
+                    action.clone(),
+                );
+                true // stop propagation; the web page must not also act on it
+            },
+        );
+    }
 }
